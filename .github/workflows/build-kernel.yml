@@ -30,19 +30,37 @@ jobs:
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
             lz4 python3 python3-pip zip unzip wget \
-            binutils-aarch64-linux-gnu mkbootimg
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            mkbootimg
 
-      - name: Download Clang toolchain (AOSP clang-r487747c)
+      - name: Download Clang + GCC toolchains
         run: |
-          mkdir -p $HOME/toolchain/clang
-          cd $HOME/toolchain
+          mkdir -p $HOME/toolchains
+
+          # Clang from AOSP (r487747c = Clang 17, used for floral)
+          mkdir -p $HOME/toolchains/clang
+          cd $HOME/toolchains
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz" \
             -O clang.tar.gz || \
           wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
             -O clang.tar.gz
           tar -xf clang.tar.gz -C clang --strip-components=1 2>/dev/null || \
           tar -xf clang.tar.gz -C clang
-          echo "CLANG_PATH=$HOME/toolchain/clang/bin" >> $GITHUB_ENV
+          echo "CLANG_PATH=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
+
+          # GCC aarch64 (64-bit cross compiler)
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            $HOME/toolchains/aarch64-linux-android
+          echo "GCC64=$HOME/toolchains/aarch64-linux-android/bin/aarch64-linux-android-" >> $GITHUB_ENV
+
+          # GCC arm (32-bit cross compiler)
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+            $HOME/toolchains/arm-linux-androideabi
+          echo "GCC32=$HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-" >> $GITHUB_ENV
 
       - name: Download stock boot.img (coral Android 13)
         run: |
@@ -90,7 +108,7 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> defconfig
           printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> defconfig
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> defconfig
-          echo "--- Added configs ---"
+          echo "--- tail of defconfig ---"
           tail -15 defconfig
 
       - name: Build kernel
@@ -98,19 +116,32 @@ jobs:
           export PATH="${{ env.CLANG_PATH }}:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
 
-          make O=out ARCH=arm64 CC=clang \
+          make O=out ARCH=arm64 \
+            CC=clang \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            LD=ld.lld \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CROSS_COMPILE=${{ env.GCC64 }} \
+            CROSS_COMPILE_ARM32=${{ env.GCC32 }} \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
             LLVM=1 LLVM_IAS=1 \
             floral_defconfig
 
-          make O=out ARCH=arm64 CC=clang \
+          make O=out ARCH=arm64 \
+            CC=clang \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            LD=ld.lld \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CROSS_COMPILE=${{ env.GCC64 }} \
+            CROSS_COMPILE_ARM32=${{ env.GCC32 }} \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
             LLVM=1 LLVM_IAS=1 \
             -j$(nproc) 2>&1 | tee build.log
 

@@ -32,19 +32,18 @@ jobs:
             lz4 python3 python3-pip zip unzip wget \
             binutils-aarch64-linux-gnu mkbootimg
 
-      - name: Download Clang + GCC toolchains
+      - name: Download Clang toolchain (ZyCromerZ Clang 16)
         run: |
           mkdir -p $HOME/toolchains/clang
-          cd $HOME/toolchains
-
-          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz" \
-            -O clang.tar.gz || \
-          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
-            -O clang.tar.gz
-          tar -xf clang.tar.gz -C clang --strip-components=1 2>/dev/null || \
-          tar -xf clang.tar.gz -C clang
+          # ZyCromerZ Clang 16 - known to work with kernel 4.14 floral
+          wget -q "https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20230721-release/Clang-16.0.6-20230721.tar.gz" \
+            -O $HOME/toolchains/clang.tar.gz
+          tar -xf $HOME/toolchains/clang.tar.gz -C $HOME/toolchains/clang --strip-components=1
           echo "CLANG_PATH=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
+          $HOME/toolchains/clang/bin/clang --version
 
+      - name: Download GCC toolchains
+        run: |
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
             $HOME/toolchains/aarch64-linux-android
@@ -54,18 +53,6 @@ jobs:
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             $HOME/toolchains/arm-linux-androideabi
           echo "GCC32=$HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-" >> $GITHUB_ENV
-
-      - name: Verify toolchain
-        run: |
-          export PATH="${{ env.CLANG_PATH }}:$PATH"
-          echo "=== clang version ==="
-          clang --version
-          echo "=== ld.lld version ==="
-          ld.lld --version
-          echo "=== GCC64 ==="
-          ls ${{ env.GCC64 }}* | head -5 || echo "GCC64 not found"
-          echo "=== GCC32 ==="
-          ls ${{ env.GCC32 }}* | head -5 || echo "GCC32 not found"
 
       - name: Download stock boot.img (coral Android 13)
         run: |
@@ -101,6 +88,8 @@ jobs:
       - name: Add SukiSU + SUSFS config options to floral_defconfig
         run: |
           DEFCONFIG=arch/arm64/configs/floral_defconfig
+          # Disable stack protector strong - not supported by all Clang builds
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' $DEFCONFIG
           printf 'CONFIG_KSU=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_MANUAL_HOOK=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS=y\n' >> $DEFCONFIG
@@ -113,7 +102,7 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
-          tail -15 $DEFCONFIG
+          tail -20 $DEFCONFIG
 
       - name: Build kernel
         run: |
@@ -121,24 +110,31 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          MAKE_ARGS="O=out ARCH=arm64
-            CC=clang
-            AR=llvm-ar
-            NM=llvm-nm
-            LD=ld.lld
-            OBJCOPY=llvm-objcopy
-            OBJDUMP=llvm-objdump
-            STRIP=llvm-strip
-            CROSS_COMPILE=${{ env.GCC64 }}
-            CROSS_COMPILE_ARM32=${{ env.GCC32 }}
-            CLANG_TRIPLE=aarch64-linux-gnu-"
+          make -C $(pwd) O=out ARCH=arm64 \
+            CC=clang \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            LD=ld.lld \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CROSS_COMPILE=${{ env.GCC64 }} \
+            CROSS_COMPILE_ARM32=${{ env.GCC32 }} \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            floral_defconfig 2>&1 | tee build.log
 
-          echo "=== Running make floral_defconfig ==="
-          make $MAKE_ARGS floral_defconfig 2>&1 | tee build.log
-          echo "=== defconfig exit: $? ==="
-
-          echo "=== Running make ==="
-          make $MAKE_ARGS -j$(nproc) 2>&1 | tee -a build.log
+          make -C $(pwd) O=out ARCH=arm64 \
+            CC=clang \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            LD=ld.lld \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CROSS_COMPILE=${{ env.GCC64 }} \
+            CROSS_COMPILE_ARM32=${{ env.GCC32 }} \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            -j$(nproc) 2>&1 | tee -a build.log
 
       - name: Repack boot.img via unpack_bootimg + mkbootimg
         run: |

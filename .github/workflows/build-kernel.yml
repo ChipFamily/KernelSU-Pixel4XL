@@ -30,18 +30,14 @@ jobs:
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
             lz4 python3 python3-pip zip unzip wget \
-            binutils-aarch64-linux-gnu \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            mkbootimg
+            binutils-aarch64-linux-gnu mkbootimg
 
       - name: Download Clang + GCC toolchains
         run: |
-          mkdir -p $HOME/toolchains
-
-          # Clang from AOSP (r487747c = Clang 17, used for floral)
           mkdir -p $HOME/toolchains/clang
           cd $HOME/toolchains
+
+          # Clang from AOSP
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz" \
             -O clang.tar.gz || \
           wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
@@ -50,13 +46,13 @@ jobs:
           tar -xf clang.tar.gz -C clang
           echo "CLANG_PATH=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
 
-          # GCC aarch64 (64-bit cross compiler)
+          # GCC aarch64 (64-bit)
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
             $HOME/toolchains/aarch64-linux-android
           echo "GCC64=$HOME/toolchains/aarch64-linux-android/bin/aarch64-linux-android-" >> $GITHUB_ENV
 
-          # GCC arm (32-bit cross compiler)
+          # GCC arm (32-bit)
           git clone --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             $HOME/toolchains/arm-linux-androideabi
@@ -94,22 +90,23 @@ jobs:
           find KernelSU -type f \( -name '*.c' -o -name '*.h' \) | \
             xargs sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g'
 
-      - name: Add SukiSU + SUSFS config options
+      - name: Add SukiSU + SUSFS config options to floral_defconfig
         run: |
-          printf 'CONFIG_KSU=y\n' >> defconfig
-          printf 'CONFIG_KSU_MANUAL_HOOK=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_SUS_PATH=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_SUS_MOUNT=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_SUS_KSTAT=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_TRY_UMOUNT=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> defconfig
-          printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> defconfig
-          echo "--- tail of defconfig ---"
-          tail -15 defconfig
+          DEFCONFIG=arch/arm64/configs/floral_defconfig
+          printf 'CONFIG_KSU=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_MANUAL_HOOK=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_SUS_PATH=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_SUS_MOUNT=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_SUS_KSTAT=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_TRY_UMOUNT=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
+          echo "--- tail of floral_defconfig ---"
+          tail -15 $DEFCONFIG
 
       - name: Build kernel
         run: |
@@ -128,7 +125,6 @@ jobs:
             CROSS_COMPILE=${{ env.GCC64 }} \
             CROSS_COMPILE_ARM32=${{ env.GCC32 }} \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            LLVM=1 LLVM_IAS=1 \
             floral_defconfig
 
           make O=out ARCH=arm64 \
@@ -142,14 +138,12 @@ jobs:
             CROSS_COMPILE=${{ env.GCC64 }} \
             CROSS_COMPILE_ARM32=${{ env.GCC32 }} \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            LLVM=1 LLVM_IAS=1 \
             -j$(nproc) 2>&1 | tee build.log
 
       - name: Repack boot.img via unpack_bootimg + mkbootimg
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
           unpack_bootimg --boot_img ${{ env.STOCK_BOOT }} --out unpacked --format mkbootimg
-          ls -la unpacked/
           cat unpacked/mkbootimg_args
           cp $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb unpacked/kernel
           MKARGS=$(cat unpacked/mkbootimg_args)

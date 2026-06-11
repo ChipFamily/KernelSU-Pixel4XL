@@ -58,24 +58,67 @@ jobs:
           cd coral-tp1a.220624.014
           unzip -q image-coral-tp1a.220624.014.zip boot.img
           echo "STOCK_BOOT=$HOME/stock/coral-tp1a.220624.014/boot.img" >> $GITHUB_ENV
-          # Pre-compute mkbootimg args from stock image
           FORMAT_MKBOOTING=$(echo `$HOME/mkbootimg-tools/unpack_bootimg.py --boot_img=$HOME/stock/coral-tp1a.220624.014/boot.img --format mkbootimg`)
           echo "FORMAT_MKBOOTING=$FORMAT_MKBOOTING" >> $GITHUB_ENV
 
       - name: Integrate SukiSU-Ultra (ShirkNeko fork, susfs-dev branch)
-        # ShirkNeko/SukiSU-Ultra is the fork used by Edhic1 for kernel 4.14 builds
         run: |
           rm -f drivers/kernelsu
           rm -rf KernelSU
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
           echo "=== KernelSU/kernel/ structure ==="
           find KernelSU/kernel -name "*syscall*" | sort
-          find KernelSU/kernel -name "Makefile" | sort
 
-      - name: Apply KSU manual hooks patch (non-GKI)
+      - name: Patch KernelSU for kernel 4.14 compatibility
+        # KernelSU/kernel/ is the real path (drivers/kernelsu is just a symlink to it)
         run: |
-          # Apply the same KSU_HOOKS_PATCH used by Edhic1 for kernel 4.14
+          # 1. Apply manual hooks patch (non-GKI method)
           git apply $GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch || true
+
+          # 2. Remove syscall_hook from Makefiles (syscall_fn_t is 5.x+ only)
+          find KernelSU/kernel -name "Makefile" -exec grep -l "syscall_hook" {} \; | \
+            xargs -r sed -i '/syscall_hook/d'
+
+          # 3. Empty syscall_hook.c
+          find KernelSU/kernel -name "syscall_hook.c" | while read f; do
+            echo "/* disabled: syscall_fn_t unavailable on kernel 4.14 */" > "$f"
+          done
+
+          # 4. Remove #include syscall_hook.h from all .c files
+          find KernelSU/kernel -name "*.c" -exec grep -l "syscall_hook" {} \; | \
+            xargs -r sed -i '/#include.*syscall_hook/d'
+
+          # 5. Remove calls to syscall_hook functions from init.c
+          find KernelSU/kernel -name "init.c" | while read f; do
+            sed -i '/ksu_syscall_hook_init/d' "$f"
+            sed -i '/ksu_syscall_hook_manager_init/d' "$f"
+            sed -i '/ksu_syscall_hook_manager_exit/d' "$f"
+          done
+
+          # 6. Stub MODULE_IMPORT_NS (added in 5.4, not in 4.14)
+          find KernelSU/kernel -name "*.c" -exec grep -l "MODULE_IMPORT_NS" {} \; | while read f; do
+            sed -i 's/MODULE_IMPORT_NS([^)]*);/\/\* MODULE_IMPORT_NS not available on kernel 4.14 \*\//' "$f"
+          done
+
+          # 7. Fix pgtable.h: kernel 4.14 uses asm/pgtable.h, not linux/pgtable.h
+          find KernelSU/kernel -name "*.c" -exec grep -l "linux/pgtable.h" {} \; | \
+            xargs -r sed -i 's|#include <linux/pgtable.h>|#include <asm/pgtable.h>|g'
+
+          # 8. Fix lsm_hook.c hlist vs list incompatibility
+          find KernelSU/kernel -name "lsm_hook.c" | while read f; do
+            sed -i 's/struct hlist_head/struct list_head/g' "$f"
+            sed -i 's/hlist_entry(/list_entry(/g' "$f"
+            sed -i 's/hlist_for_each_entry(/list_for_each_entry(/g' "$f"
+            sed -i 's/\.first/.next/g' "$f"
+            sed -i 's/->pprev/->prev/g' "$f"
+            echo "Patched lsm_hook.c: $f"
+          done
+
+          echo "=== Verify ==="
+          find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
+            xargs grep -l "syscall_hook" 2>/dev/null || echo "syscall_hook: CLEAN"
+          find KernelSU/kernel -name "*.c" | \
+            xargs grep -l "MODULE_IMPORT_NS" 2>/dev/null || echo "MODULE_IMPORT_NS: CLEAN"
 
       - name: Apply SUSFS kernel patches (fs + include)
         run: |
@@ -128,7 +171,6 @@ jobs:
             O=out -j$(nproc) 2>&1 | tee -a build.log
 
       - name: Repack boot.img (AOSP Python tools)
-        # Same method as Edhic1/kernel_KSu_Next_Lancelot
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
           NEW_KERNEL=$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb

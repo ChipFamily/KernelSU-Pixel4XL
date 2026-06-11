@@ -21,7 +21,7 @@ jobs:
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
             lz4 python3 python3-pip zip unzip wget \
-            binutils-aarch64-linux-gnu mkbootimg
+            binutils-aarch64-linux-gnu mkbootimg p7zip-full
 
       - name: Download Clang r445002 (AOSP-12 GitHub mirror)
         run: |
@@ -143,11 +143,21 @@ jobs:
       - name: Repack boot.img
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
-          unpack_bootimg --boot_img ${{ env.STOCK_BOOT }} --out unpacked --format mkbootimg
-          cat unpacked/mkbootimg_args
-          cp $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb unpacked/kernel
-          MKARGS=$(cat unpacked/mkbootimg_args)
-          eval mkbootimg $MKARGS --kernel unpacked/kernel --output new-boot.img
+          STOCK=${{ env.STOCK_BOOT }}
+          NEW_KERNEL=$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb
+
+          # magiskboot - reliable boot.img repack, no version dependency
+          wget -q "https://github.com/xiaoxindada/magiskboot_ndk_on_linux/releases/download/Magiskboot-28001-5/magiskboot.7z" -O magiskboot.7z
+          7z e magiskboot.7z -o. -r
+          find . -name "magiskboot" | head -1 | xargs -I{} cp {} ./magiskboot_bin
+          chmod +x magiskboot_bin
+          mv magiskboot_bin magiskboot
+
+          cp $STOCK boot.img
+          ./magiskboot unpack boot.img
+          ls -la
+          cp $NEW_KERNEL kernel
+          ./magiskboot repack boot.img new-boot.img
           ls -lh new-boot.img
           echo "BOOT_IMG=$HOME/bootwork/new-boot.img" >> $GITHUB_ENV
 

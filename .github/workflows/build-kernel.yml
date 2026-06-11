@@ -36,9 +36,8 @@ jobs:
           echo "CLANG_PATH=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
           echo "CLANG_LIB=$HOME/toolchains/clang/lib64" >> $GITHUB_ENV
           $HOME/toolchains/clang/bin/clang --version
-          ls $HOME/toolchains/clang/bin/ | grep -E "^(clang|ld|llvm)" | head -20
 
-      - name: Download GCC toolchains (LineageOS mirrors - contain real binaries)
+      - name: Download GCC toolchains (LineageOS mirrors)
         run: |
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
@@ -49,10 +48,6 @@ jobs:
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
             $HOME/toolchains/arm-linux-androideabi
           echo "GCC32=$HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-" >> $GITHUB_ENV
-
-          # Verify binaries exist
-          ls $HOME/toolchains/aarch64-linux-android/bin/aarch64-linux-android-ld || echo "WARNING: ld not found"
-          ls $HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-ld || echo "WARNING: ld not found"
 
       - name: Download stock boot.img (coral Android 13)
         run: |
@@ -101,9 +96,12 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
+          # Disable LTO/CFI to avoid LLVMgold.so dependency
+          sed -i 's/CONFIG_LTO_CLANG=y/# CONFIG_LTO_CLANG is not set/' $DEFCONFIG
+          sed -i 's/CONFIG_CFI_CLANG=y/# CONFIG_CFI_CLANG is not set/' $DEFCONFIG
           tail -15 $DEFCONFIG
 
-      - name: Build kernel (freak07/Kirisakura method)
+      - name: Build kernel
         run: |
           export PATH="${{ env.CLANG_PATH }}:$PATH"
           export LD_LIBRARY_PATH="${{ env.CLANG_LIB }}:$LD_LIBRARY_PATH"
@@ -115,10 +113,12 @@ jobs:
 
           make CC=clang AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            LD=ld.lld \
             O=out floral_defconfig 2>&1 | tee build.log
 
           make CC=clang AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            LD=ld.lld \
             O=out -j$(nproc) 2>&1 | tee -a build.log
 
       - name: Repack boot.img

@@ -22,6 +22,9 @@
 
 extern const void *sys_call_table[];
 
+/* Backport for SukiSU on kernel 4.14 - syscall_fn_t was added in kernel 5.x */
+typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);
+
 static inline int syscall_get_nr(struct task_struct *task,
 				 struct pt_regs *regs)
 {

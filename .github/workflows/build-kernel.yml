@@ -29,7 +29,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
-            lz4 python3 zip unzip wget binutils-aarch64-linux-gnu
+            lz4 python3 python3-pip zip unzip wget \
+            binutils-aarch64-linux-gnu android-sdk-libsparse-utils
+          # mkbootimg / unpackbootimg from pip (official AOSP tools)
+          pip3 install mkbootimg --quiet
 
       - name: Download Clang toolchain (AOSP clang-r487747c)
         run: |
@@ -42,21 +45,6 @@ jobs:
           tar -xf clang.tar.gz -C clang --strip-components=1 2>/dev/null || \
           tar -xf clang.tar.gz -C clang
           echo "CLANG_PATH=$HOME/toolchain/clang/bin" >> $GITHUB_ENV
-          ls $HOME/toolchain/clang/bin/
-
-      - name: Download magiskboot (standalone binary)
-        run: |
-          # Use standalone magiskboot binary from nightly build
-          wget -q "https://github.com/ookiineko/magiskboot_build/releases/latest/download/magiskboot_linux_amd64" \
-            -O /usr/local/bin/magiskboot || \
-          wget -q "https://github.com/xiaolu/mkbootimg_tools/releases/latest/download/magiskboot" \
-            -O /usr/local/bin/magiskboot || \
-          # Fallback: extract from Magisk APK tools zip
-          ( wget -q "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk" -O magisk.apk && \
-            unzip -q magisk.apk assets/x86_64/magiskboot -d magisk_tmp && \
-            cp magisk_tmp/assets/x86_64/magiskboot /usr/local/bin/magiskboot )
-          chmod +x /usr/local/bin/magiskboot
-          magiskboot --help 2>&1 | head -3 || true
 
       - name: Download stock boot.img (coral Android 13)
         run: |
@@ -128,14 +116,26 @@ jobs:
             LLVM=1 LLVM_IAS=1 \
             -j$(nproc) 2>&1 | tee build.log
 
-      - name: Repack boot.img
+      - name: Repack boot.img via mkbootimg (Variant B)
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
-          cp ${{ env.STOCK_BOOT }} boot.img
-          magiskboot unpack boot.img
-          cp $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb kernel
-          magiskboot repack boot.img new-boot.img
+
+          # Unpack stock boot.img to extract ramdisk + args
+          unpack_bootimg --boot_img ${{ env.STOCK_BOOT }} --out unpacked --format mkbootimg
+
+          # unpacked/mkbootimg_args contains all original flags
+          MKARGS=$(cat unpacked/mkbootimg_args)
+
+          # Replace kernel with our freshly built one
+          cp $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb unpacked/kernel
+
+          # Repack with original ramdisk + args, only kernel replaced
+          eval mkbootimg $MKARGS \
+            --kernel unpacked/kernel \
+            --output new-boot.img
+
           echo "BOOT_IMG=$HOME/bootwork/new-boot.img" >> $GITHUB_ENV
+          ls -lh new-boot.img
 
       - name: Upload boot.img
         uses: actions/upload-artifact@v4

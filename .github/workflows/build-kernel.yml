@@ -35,7 +35,6 @@ jobs:
         run: |
           mkdir -p $HOME/toolchain/clang
           cd $HOME/toolchain
-          # Use prebuilt clang from AOSP CI
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz" \
             -O clang.tar.gz || \
           wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
@@ -45,12 +44,19 @@ jobs:
           echo "CLANG_PATH=$HOME/toolchain/clang/bin" >> $GITHUB_ENV
           ls $HOME/toolchain/clang/bin/
 
-      - name: Download magiskboot
+      - name: Download magiskboot (standalone binary)
         run: |
-          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk -O magisk.apk
-          unzip -q magisk.apk lib/x86_64/libmagiskboot.so -d magisk_tmp
-          cp magisk_tmp/lib/x86_64/libmagiskboot.so /usr/local/bin/magiskboot
+          # Use standalone magiskboot binary from nightly build
+          wget -q "https://github.com/ookiineko/magiskboot_build/releases/latest/download/magiskboot_linux_amd64" \
+            -O /usr/local/bin/magiskboot || \
+          wget -q "https://github.com/xiaolu/mkbootimg_tools/releases/latest/download/magiskboot" \
+            -O /usr/local/bin/magiskboot || \
+          # Fallback: extract from Magisk APK tools zip
+          ( wget -q "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk" -O magisk.apk && \
+            unzip -q magisk.apk assets/x86_64/magiskboot -d magisk_tmp && \
+            cp magisk_tmp/assets/x86_64/magiskboot /usr/local/bin/magiskboot )
           chmod +x /usr/local/bin/magiskboot
+          magiskboot --help 2>&1 | head -3 || true
 
       - name: Download stock boot.img (coral Android 13)
         run: |

@@ -30,9 +30,11 @@ jobs:
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
             lz4 python3 python3-pip zip unzip wget \
-            binutils-aarch64-linux-gnu android-sdk-libsparse-utils
-          # mkbootimg / unpackbootimg from pip (official AOSP tools)
-          pip3 install mkbootimg --quiet
+            binutils-aarch64-linux-gnu
+          # mkbootimg tools - install from AOSP git directly
+          pip3 install --quiet \
+            "git+https://android.googlesource.com/platform/system/tools/mkbootimg" || \
+          sudo apt-get install -y mkbootimg
 
       - name: Download Clang toolchain (AOSP clang-r487747c)
         run: |
@@ -116,26 +118,26 @@ jobs:
             LLVM=1 LLVM_IAS=1 \
             -j$(nproc) 2>&1 | tee build.log
 
-      - name: Repack boot.img via mkbootimg (Variant B)
+      - name: Repack boot.img via unpack_bootimg + mkbootimg
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
 
-          # Unpack stock boot.img to extract ramdisk + args
+          # Unpack stock boot.img - extracts ramdisk and all header args
           unpack_bootimg --boot_img ${{ env.STOCK_BOOT }} --out unpacked --format mkbootimg
 
-          # unpacked/mkbootimg_args contains all original flags
-          MKARGS=$(cat unpacked/mkbootimg_args)
+          # Show what was extracted
+          ls -la unpacked/
+          cat unpacked/mkbootimg_args || true
 
-          # Replace kernel with our freshly built one
+          # Replace kernel with our build
           cp $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb unpacked/kernel
 
-          # Repack with original ramdisk + args, only kernel replaced
-          eval mkbootimg $MKARGS \
-            --kernel unpacked/kernel \
-            --output new-boot.img
+          # Rebuild boot.img with original args + our kernel
+          MKARGS=$(cat unpacked/mkbootimg_args)
+          eval mkbootimg $MKARGS --kernel unpacked/kernel --output new-boot.img
 
-          echo "BOOT_IMG=$HOME/bootwork/new-boot.img" >> $GITHUB_ENV
           ls -lh new-boot.img
+          echo "BOOT_IMG=$HOME/bootwork/new-boot.img" >> $GITHUB_ENV
 
       - name: Upload boot.img
         uses: actions/upload-artifact@v4

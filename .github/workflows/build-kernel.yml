@@ -28,27 +28,31 @@ jobs:
             lz4 python3 python3-pip zip unzip wget \
             binutils-aarch64-linux-gnu mkbootimg
 
-      - name: Download Clang r445002 (AOSP mirror on GitHub)
+      - name: Download Clang r445002 (AOSP-12 GitHub mirror)
         run: |
-          # AOSP-12 mirror of clang-r445002 - exact version freak07 uses for floral
           git clone --depth=1 \
             https://github.com/AOSP-12/prebuilts_clang_host_linux-x86_clang-r445002 \
             $HOME/toolchains/clang
           echo "CLANG_PATH=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
           echo "CLANG_LIB=$HOME/toolchains/clang/lib64" >> $GITHUB_ENV
           $HOME/toolchains/clang/bin/clang --version
+          ls $HOME/toolchains/clang/bin/ | grep -E "^(clang|ld|llvm)" | head -20
 
-      - name: Download GCC toolchains (AOSP 4.9)
+      - name: Download GCC toolchains (LineageOS mirrors - contain real binaries)
         run: |
           git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
             $HOME/toolchains/aarch64-linux-android
           echo "GCC64=$HOME/toolchains/aarch64-linux-android/bin/aarch64-linux-android-" >> $GITHUB_ENV
 
           git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
             $HOME/toolchains/arm-linux-androideabi
           echo "GCC32=$HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-" >> $GITHUB_ENV
+
+          # Verify binaries exist
+          ls $HOME/toolchains/aarch64-linux-android/bin/aarch64-linux-android-ld || echo "WARNING: ld not found"
+          ls $HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-ld || echo "WARNING: ld not found"
 
       - name: Download stock boot.img (coral Android 13)
         run: |
@@ -87,8 +91,6 @@ jobs:
           DEFCONFIG=arch/arm64/configs/floral_defconfig
           printf 'CONFIG_KSU=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_MANUAL_HOOK=y\n' >> $DEFCONFIG
-          printf 'CONFIG_KALLSYMS=y\n' >> $DEFCONFIG
-          printf 'CONFIG_KALLSYMS_ALL=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SUS_PATH=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SUS_MOUNT=y\n' >> $DEFCONFIG
@@ -99,7 +101,7 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
-          tail -20 $DEFCONFIG
+          tail -15 $DEFCONFIG
 
       - name: Build kernel (freak07/Kirisakura method)
         run: |

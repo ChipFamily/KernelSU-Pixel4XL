@@ -1,12 +1,7 @@
 name: Build Kernel - Pixel 4 XL (SukiSU-Ultra + SUSFS)
 
 on:
-  workflow_dispatch:
-    inputs:
-      susfs_branch:
-        description: 'SUSFS branch'
-        required: false
-        default: 'kernel-4.14'
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -58,23 +53,27 @@ jobs:
           unzip -q image-coral-tp1a.220624.014.zip boot.img
           echo "STOCK_BOOT=$HOME/stock/coral-tp1a.220624.014/boot.img" >> $GITHUB_ENV
 
-      - name: Integrate SukiSU-Ultra (builtin mode for non-GKI)
+      - name: Integrate SukiSU-Ultra with built-in SUSFS (susfs-kernel-4.14 branch)
+        # Variant B: use susfs-kernel-4.14 branch which includes SUSFS already
+        # No need to apply separate SUSFS patches - everything is bundled
         run: |
           rm -f drivers/kernelsu
           rm -rf KernelSU
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          echo "SukiSU-Ultra (builtin) integrated"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-kernel-4.14
+          echo "SukiSU-Ultra (susfs-kernel-4.14) integrated"
+          ls KernelSU/
 
-      - name: Apply SUSFS patches (kernel-4.14)
+      - name: Apply kernel SUSFS patches (fs + include only, no KernelSU patch)
+        # We still need to patch the kernel itself (fs/ and include/)
+        # but NOT the KernelSU patch since SukiSU already includes it
         run: |
-          git clone --depth=1 -b ${{ github.event.inputs.susfs_branch }} \
+          git clone --depth=1 -b kernel-4.14 \
             https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
           cp -v $HOME/susfs4ksu/kernel_patches/fs/* fs/
           cp -v $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
-          cp $HOME/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
-          cd KernelSU && patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true && cd ..
           cp $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
           patch -p1 --forward < 50_add_susfs_in_kernel-4.14.patch || true
+          echo "Kernel SUSFS patches applied"
 
       - name: Disable KPROBE hooks (non-GKI)
         run: |
@@ -84,6 +83,9 @@ jobs:
       - name: Add KSU + SUSFS configs to floral_defconfig
         run: |
           DEFCONFIG=arch/arm64/configs/floral_defconfig
+          # Disable LTO/CFI - requires LLVMgold.so plugin not available in CI
+          sed -i 's/CONFIG_LTO_CLANG=y/# CONFIG_LTO_CLANG is not set/' $DEFCONFIG
+          sed -i 's/CONFIG_CFI_CLANG=y/# CONFIG_CFI_CLANG is not set/' $DEFCONFIG
           printf 'CONFIG_KSU=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_MANUAL_HOOK=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS=y\n' >> $DEFCONFIG
@@ -96,9 +98,6 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
-          # Disable LTO/CFI to avoid LLVMgold.so dependency
-          sed -i 's/CONFIG_LTO_CLANG=y/# CONFIG_LTO_CLANG is not set/' $DEFCONFIG
-          sed -i 's/CONFIG_CFI_CLANG=y/# CONFIG_CFI_CLANG is not set/' $DEFCONFIG
           tail -15 $DEFCONFIG
 
       - name: Build kernel

@@ -28,20 +28,15 @@ jobs:
             lz4 python3 python3-pip zip unzip wget \
             binutils-aarch64-linux-gnu mkbootimg
 
-      - name: Download Clang r445002 (used by freak07/Kirisakura for floral)
+      - name: Download Clang r445002 (AOSP mirror on GitHub)
         run: |
-          mkdir -p $HOME/toolchains/clang
-          # clang-r445002 - the exact version Google/freak07 uses for coral 4.14
-          # Mirror via android-googlesource on CI
-          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r445002.tar.gz" \
-            -O $HOME/toolchains/clang.tar.gz || \
-          wget -q "https://github.com/nicehash/clang-android/releases/download/clang-r445002b/clang-r445002b-linux-x86_64.tar.gz" \
-            -O $HOME/toolchains/clang.tar.gz
-          tar -xf $HOME/toolchains/clang.tar.gz -C $HOME/toolchains/clang --strip-components=1 2>/dev/null || \
-          tar -xf $HOME/toolchains/clang.tar.gz -C $HOME/toolchains/clang
+          # AOSP-12 mirror of clang-r445002 - exact version freak07 uses for floral
+          git clone --depth=1 \
+            https://github.com/AOSP-12/prebuilts_clang_host_linux-x86_clang-r445002 \
+            $HOME/toolchains/clang
           echo "CLANG_PATH=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
           echo "CLANG_LIB=$HOME/toolchains/clang/lib64" >> $GITHUB_ENV
-          $HOME/toolchains/clang/bin/clang --version || echo "Clang version check failed"
+          $HOME/toolchains/clang/bin/clang --version
 
       - name: Download GCC toolchains (AOSP 4.9)
         run: |
@@ -55,7 +50,7 @@ jobs:
             $HOME/toolchains/arm-linux-androideabi
           echo "GCC32=$HOME/toolchains/arm-linux-androideabi/bin/arm-linux-androideabi-" >> $GITHUB_ENV
 
-      - name: Download stock boot.img (coral Android 13 TP1A.220624.014)
+      - name: Download stock boot.img (coral Android 13)
         run: |
           mkdir -p $HOME/stock && cd $HOME/stock
           wget -q "https://dl.google.com/dl/android/aosp/coral-tp1a.220624.014-factory-8f60813e.zip" -O factory.zip
@@ -68,9 +63,8 @@ jobs:
         run: |
           rm -f drivers/kernelsu
           rm -rf KernelSU
-          # 'builtin' is the correct mode for non-GKI kernels per SukiSU docs
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          echo "SukiSU-Ultra integrated (builtin mode)"
+          echo "SukiSU-Ultra (builtin) integrated"
 
       - name: Apply SUSFS patches (kernel-4.14)
         run: |
@@ -83,7 +77,7 @@ jobs:
           cp $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
           patch -p1 --forward < 50_add_susfs_in_kernel-4.14.patch || true
 
-      - name: Disable KPROBE hooks (non-GKI manual hook mode)
+      - name: Disable KPROBE hooks (non-GKI)
         run: |
           find KernelSU -type f \( -name '*.c' -o -name '*.h' \) | \
             xargs sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g'
@@ -91,12 +85,10 @@ jobs:
       - name: Add KSU + SUSFS configs to floral_defconfig
         run: |
           DEFCONFIG=arch/arm64/configs/floral_defconfig
-          # SukiSU non-GKI required configs
           printf 'CONFIG_KSU=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_MANUAL_HOOK=y\n' >> $DEFCONFIG
           printf 'CONFIG_KALLSYMS=y\n' >> $DEFCONFIG
           printf 'CONFIG_KALLSYMS_ALL=y\n' >> $DEFCONFIG
-          # SUSFS configs
           printf 'CONFIG_KSU_SUSFS=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SUS_PATH=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SUS_MOUNT=y\n' >> $DEFCONFIG
@@ -107,12 +99,10 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
-          echo "--- last 20 lines of floral_defconfig ---"
           tail -20 $DEFCONFIG
 
       - name: Build kernel (freak07/Kirisakura method)
         run: |
-          # Exactly as freak07 builds Kirisakura for floral (coral/flame)
           export PATH="${{ env.CLANG_PATH }}:$PATH"
           export LD_LIBRARY_PATH="${{ env.CLANG_LIB }}:$LD_LIBRARY_PATH"
           export ARCH=arm64

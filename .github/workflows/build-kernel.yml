@@ -21,7 +21,13 @@ jobs:
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
             lz4 python3 python3-pip zip unzip wget \
-            binutils-aarch64-linux-gnu mkbootimg
+            binutils-aarch64-linux-gnu
+
+      - name: Download AOSP mkbootimg tools
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg \
+            $HOME/mkbootimg-tools -b master-kernel-build-2022 --depth=1
+          echo "MKBOOTIMG_TOOLS=$HOME/mkbootimg-tools" >> $GITHUB_ENV
 
       - name: Download Clang r445002 (AOSP-12 GitHub mirror)
         run: |
@@ -52,55 +58,24 @@ jobs:
           cd coral-tp1a.220624.014
           unzip -q image-coral-tp1a.220624.014.zip boot.img
           echo "STOCK_BOOT=$HOME/stock/coral-tp1a.220624.014/boot.img" >> $GITHUB_ENV
+          # Pre-compute mkbootimg args from stock image
+          FORMAT_MKBOOTING=$(echo `$HOME/mkbootimg-tools/unpack_bootimg.py --boot_img=$HOME/stock/coral-tp1a.220624.014/boot.img --format mkbootimg`)
+          echo "FORMAT_MKBOOTING=$FORMAT_MKBOOTING" >> $GITHUB_ENV
 
-      - name: Integrate SukiSU-Ultra (susfs-dev branch)
+      - name: Integrate SukiSU-Ultra (ShirkNeko fork, susfs-dev branch)
+        # ShirkNeko/SukiSU-Ultra is the fork used by Edhic1 for kernel 4.14 builds
         run: |
           rm -f drivers/kernelsu
           rm -rf KernelSU
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
           echo "=== KernelSU/kernel/ structure ==="
           find KernelSU/kernel -name "*syscall*" | sort
           find KernelSU/kernel -name "Makefile" | sort
 
-      - name: Patch KernelSU for kernel 4.14 compatibility
-        # IMPORTANT: drivers/kernelsu is a SYMLINK to KernelSU/kernel/
-        # Must operate on real path KernelSU/kernel/ directly
+      - name: Apply KSU manual hooks patch (non-GKI)
         run: |
-          # 1. Remove syscall_hook from every Makefile
-          find KernelSU/kernel -name "Makefile" -exec grep -l "syscall_hook" {} \; | \
-            xargs -r sed -i '/syscall_hook/d'
-
-          # 2. Empty syscall_hook.c (makes it compile to nothing)
-          find KernelSU/kernel -name "syscall_hook.c" | while read f; do
-            echo "/* disabled: syscall_fn_t unavailable on kernel 4.14 */" > "$f"
-            echo "Cleared: $f"
-          done
-
-          # 3. Remove #include of syscall_hook.h from all .c files
-          find KernelSU/kernel -name "*.c" -exec grep -l "syscall_hook" {} \; | \
-            xargs -r sed -i '/#include.*syscall_hook/d'
-
-          # 4. Remove CALLS to syscall_hook functions from init.c
-          find KernelSU/kernel -name "init.c" | while read f; do
-            sed -i '/ksu_syscall_hook_init/d' "$f"
-            sed -i '/ksu_syscall_hook_manager_init/d' "$f"
-            sed -i '/ksu_syscall_hook_manager_exit/d' "$f"
-          done
-
-          # 5. Stub MODULE_IMPORT_NS - added in kernel 5.4, not available in 4.14
-          # Add a no-op define to the KernelSU compat header or directly to affected files
-          find KernelSU/kernel -name "*.c" -exec grep -l "MODULE_IMPORT_NS" {} \; | while read f; do
-            sed -i 's/MODULE_IMPORT_NS([^)]*);/\/\* MODULE_IMPORT_NS not available on kernel 4.14 \*\//' "$f"
-            echo "Patched MODULE_IMPORT_NS in: $f"
-          done
-
-          echo "=== Verify: remaining issues ==="
-          echo "--- syscall_hook refs ---"
-          find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
-            xargs grep -l "syscall_hook" 2>/dev/null || echo "CLEAN"
-          echo "--- MODULE_IMPORT_NS refs ---"
-          find KernelSU/kernel -name "*.c" | \
-            xargs grep -l "MODULE_IMPORT_NS" 2>/dev/null || echo "CLEAN"
+          # Apply the same KSU_HOOKS_PATCH used by Edhic1 for kernel 4.14
+          git apply $GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch || true
 
       - name: Apply SUSFS kernel patches (fs + include)
         run: |
@@ -128,7 +103,7 @@ jobs:
           printf 'CONFIG_KSU_SUSFS_TRY_UMOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y\n' >> $DEFCONFIG
-          printf 'CONFIG_KSU_SUSFS_SPOOFE_UNAME=y\n' >> $DEFCONFIG
+          printf 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y\n' >> $DEFCONFIG
           printf 'CONFIG_KSU_SUSFS_ENABLE_LOG=y\n' >> $DEFCONFIG
           tail -20 $DEFCONFIG
 
@@ -152,27 +127,17 @@ jobs:
             LD=ld.lld \
             O=out -j$(nproc) 2>&1 | tee -a build.log
 
-      - name: Repack boot.img
+      - name: Repack boot.img (AOSP Python tools)
+        # Same method as Edhic1/kernel_KSu_Next_Lancelot
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
-          STOCK=${{ env.STOCK_BOOT }}
           NEW_KERNEL=$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb
 
-          # Get magiskboot from official Magisk APK (standard approach per skrimix/pixel_kernelsu_patch.sh)
-          MAGISK_VER="v26.1"
-          wget -q "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk" -O magisk.apk
-          unzip -o -q magisk.apk lib/x86_64/libmagiskboot.so -d .
-          mv lib/x86_64/libmagiskboot.so magiskboot
-          chmod +x magiskboot
-          rm -rf lib magisk.apk
-
-          cp $STOCK boot.img
-          ./magiskboot unpack boot.img
-          ls -la
-          cp $NEW_KERNEL kernel
-          ./magiskboot repack boot.img new-boot.img
-          ls -lh new-boot.img
-          echo "BOOT_IMG=$HOME/bootwork/new-boot.img" >> $GITHUB_ENV
+          ${{ env.MKBOOTIMG_TOOLS }}/unpack_bootimg.py --boot_img=${{ env.STOCK_BOOT }}
+          cp $NEW_KERNEL out/kernel
+          ${{ env.MKBOOTIMG_TOOLS }}/mkbootimg.py ${{ env.FORMAT_MKBOOTING }} -o boot.img
+          ls -lh boot.img
+          echo "BOOT_IMG=$HOME/bootwork/boot.img" >> $GITHUB_ENV
 
       - name: Upload boot.img
         uses: actions/upload-artifact@v4

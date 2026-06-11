@@ -66,25 +66,29 @@ jobs:
         # IMPORTANT: drivers/kernelsu is a SYMLINK to KernelSU/kernel/
         # Must operate on real path KernelSU/kernel/ directly
         run: |
-          echo "=== All Makefiles content ==="
-          find KernelSU/kernel -name "Makefile" | while read f; do
-            echo "--- $f ---"
-            cat "$f"
-          done
-
-          # Remove syscall_hook from every Makefile that has it
+          # 1. Remove syscall_hook from every Makefile
           find KernelSU/kernel -name "Makefile" -exec grep -l "syscall_hook" {} \; | \
             xargs -r sed -i '/syscall_hook/d'
 
-          # Empty every syscall_hook.c found (makes it compile to nothing)
+          # 2. Empty syscall_hook.c (makes it compile to nothing)
           find KernelSU/kernel -name "syscall_hook.c" | while read f; do
             echo "/* disabled: syscall_fn_t unavailable on kernel 4.14 */" > "$f"
             echo "Cleared: $f"
           done
 
-          # Remove any #include of syscall_hook.h from all .c files
+          # 3. Remove #include of syscall_hook.h from all .c files
           find KernelSU/kernel -name "*.c" -exec grep -l "syscall_hook" {} \; | \
             xargs -r sed -i '/#include.*syscall_hook/d'
+
+          # 4. Remove CALLS to syscall_hook functions from init.c
+          # init.c calls ksu_syscall_hook_init/manager_init/manager_exit which no longer exist
+          find KernelSU/kernel -name "init.c" | while read f; do
+            echo "Patching $f"
+            sed -i '/ksu_syscall_hook_init/d' "$f"
+            sed -i '/ksu_syscall_hook_manager_init/d' "$f"
+            sed -i '/ksu_syscall_hook_manager_exit/d' "$f"
+            echo "Done: $f"
+          done
 
           echo "=== Verify: remaining syscall_hook references ==="
           find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \

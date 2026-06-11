@@ -58,62 +58,46 @@ jobs:
           rm -f drivers/kernelsu
           rm -rf KernelSU
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
-          echo "SukiSU-Ultra (susfs-dev) integrated"
+          echo "=== KernelSU/kernel/ structure ==="
+          find KernelSU/kernel -name "*syscall*" | sort
+          find KernelSU/kernel -name "Makefile" | sort
 
-      - name: Apply manual kernel hooks patch (non-GKI method for 4.14)
-        # This is the correct approach for non-GKI kernels - manually hook into
-        # fs/exec.c, fs/open.c, fs/stat.c etc. instead of using syscall table hook
-        # Pattern from Edhic1/kernel_KSu_Next_Lancelot (Redmi 9, kernel 4.14)
+      - name: Disable syscall_hook for kernel 4.14
+        # IMPORTANT: drivers/kernelsu is a SYMLINK to KernelSU/kernel/
+        # Must operate on real path KernelSU/kernel/ directly
         run: |
-          cat > /tmp/ksu_hooks.patch << 'PATCH_EOF'
-          --- a/fs/exec.c
-          +++ b/fs/exec.c
-          @@ -1706,6 +1706,12 @@ static int exec_binprm(struct linux_binprm *bprm)
-           	return ret;
-           }
-           
-          +#ifdef CONFIG_KSU
-          +extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
-          +			       void *envp, int *flags);
-          +#endif
-          +
-           /*
-            * sys_execve() executes a new program.
-            */
-          @@ -1720,6 +1726,10 @@ static int do_execveat_common(int fd, struct filename *filename,
-           	struct files_struct *displaced;
-           	int retval;
-           
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-          +#endif
-          +
-           	if (IS_ERR(filename))
-           		return PTR_ERR(filename);
-          PATCH_EOF
-          # Apply SUSFS kernel patches (fs/ and include/ only)
+          echo "=== All Makefiles content ==="
+          find KernelSU/kernel -name "Makefile" | while read f; do
+            echo "--- $f ---"
+            cat "$f"
+          done
+
+          # Remove syscall_hook from every Makefile that has it
+          find KernelSU/kernel -name "Makefile" -exec grep -l "syscall_hook" {} \; | \
+            xargs -r sed -i '/syscall_hook/d'
+
+          # Empty every syscall_hook.c found (makes it compile to nothing)
+          find KernelSU/kernel -name "syscall_hook.c" | while read f; do
+            echo "/* disabled: syscall_fn_t unavailable on kernel 4.14 */" > "$f"
+            echo "Cleared: $f"
+          done
+
+          # Remove any #include of syscall_hook.h from all .c files
+          find KernelSU/kernel -name "*.c" -exec grep -l "syscall_hook" {} \; | \
+            xargs -r sed -i '/#include.*syscall_hook/d'
+
+          echo "=== Verify: remaining syscall_hook references ==="
+          find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
+            xargs grep -l "syscall_hook" 2>/dev/null || echo "CLEAN - no remaining references"
+
+      - name: Apply SUSFS kernel patches (fs + include)
+        run: |
           git clone --depth=1 -b kernel-4.14 \
             https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
           cp -v $HOME/susfs4ksu/kernel_patches/fs/* fs/
           cp -v $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
           patch -p1 --forward < 50_add_susfs_in_kernel-4.14.patch || true
-          echo "SUSFS kernel patches applied"
-
-      - name: Disable syscall_hook (not compatible with kernel 4.14)
-        # syscall_hook.h uses syscall_fn_t which is a 5.x+ type
-        # On 4.14 we use manual hooks (CONFIG_KSU_MANUAL_HOOK) instead
-        run: |
-          # Prevent syscall_hook.c from being compiled
-          if [ -f drivers/kernelsu/hook/syscall_hook.c ]; then
-            echo "# syscall_hook disabled for kernel 4.14" > drivers/kernelsu/hook/syscall_hook.c
-          fi
-          # Remove syscall_hook.o from Makefile if present
-          if [ -f drivers/kernelsu/hook/Makefile ]; then
-            sed -i '/syscall_hook/d' drivers/kernelsu/hook/Makefile
-          fi
-          find drivers/kernelsu -name "Makefile" | xargs grep -l "syscall_hook" | \
-            xargs -I{} sed -i '/syscall_hook/d' {} || true
 
       - name: Add KSU + SUSFS configs to floral_defconfig
         run: |

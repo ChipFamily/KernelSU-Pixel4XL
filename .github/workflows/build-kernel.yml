@@ -30,11 +30,9 @@ jobs:
             bc bison build-essential ca-certificates cpio curl \
             flex git kmod libelf-dev libssl-dev \
             lz4 python3 python3-pip zip unzip wget \
-            binutils-aarch64-linux-gnu
-          # mkbootimg tools - install from AOSP git directly
-          pip3 install --quiet \
-            "git+https://android.googlesource.com/platform/system/tools/mkbootimg" || \
-          sudo apt-get install -y mkbootimg
+            binutils-aarch64-linux-gnu mkbootimg
+          python3 -c "import mkbootimg" 2>/dev/null || true
+          which mkbootimg unpack_bootimg 2>/dev/null || true
 
       - name: Download Clang toolchain (AOSP clang-r487747c)
         run: |
@@ -82,20 +80,21 @@ jobs:
 
       - name: Add SukiSU + SUSFS config options
         run: |
+          # NOTE: no leading spaces - defconfig requires lines starting at column 0
           cat >> defconfig << 'EOF'
-          CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SPOOFE_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          EOF
+CONFIG_KSU=y
+CONFIG_KSU_MANUAL_HOOK=y
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SPOOFE_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+EOF
 
       - name: Build kernel
         run: |
@@ -121,21 +120,12 @@ jobs:
       - name: Repack boot.img via unpack_bootimg + mkbootimg
         run: |
           mkdir -p $HOME/bootwork && cd $HOME/bootwork
-
-          # Unpack stock boot.img - extracts ramdisk and all header args
           unpack_bootimg --boot_img ${{ env.STOCK_BOOT }} --out unpacked --format mkbootimg
-
-          # Show what was extracted
           ls -la unpacked/
-          cat unpacked/mkbootimg_args || true
-
-          # Replace kernel with our build
+          cat unpacked/mkbootimg_args
           cp $GITHUB_WORKSPACE/out/arch/arm64/boot/Image.lz4-dtb unpacked/kernel
-
-          # Rebuild boot.img with original args + our kernel
           MKARGS=$(cat unpacked/mkbootimg_args)
           eval mkbootimg $MKARGS --kernel unpacked/kernel --output new-boot.img
-
           ls -lh new-boot.img
           echo "BOOT_IMG=$HOME/bootwork/new-boot.img" >> $GITHUB_ENV
 

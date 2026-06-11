@@ -62,7 +62,7 @@ jobs:
           find KernelSU/kernel -name "*syscall*" | sort
           find KernelSU/kernel -name "Makefile" | sort
 
-      - name: Disable syscall_hook for kernel 4.14
+      - name: Patch KernelSU for kernel 4.14 compatibility
         # IMPORTANT: drivers/kernelsu is a SYMLINK to KernelSU/kernel/
         # Must operate on real path KernelSU/kernel/ directly
         run: |
@@ -81,18 +81,26 @@ jobs:
             xargs -r sed -i '/#include.*syscall_hook/d'
 
           # 4. Remove CALLS to syscall_hook functions from init.c
-          # init.c calls ksu_syscall_hook_init/manager_init/manager_exit which no longer exist
           find KernelSU/kernel -name "init.c" | while read f; do
-            echo "Patching $f"
             sed -i '/ksu_syscall_hook_init/d' "$f"
             sed -i '/ksu_syscall_hook_manager_init/d' "$f"
             sed -i '/ksu_syscall_hook_manager_exit/d' "$f"
-            echo "Done: $f"
           done
 
-          echo "=== Verify: remaining syscall_hook references ==="
+          # 5. Stub MODULE_IMPORT_NS - added in kernel 5.4, not available in 4.14
+          # Add a no-op define to the KernelSU compat header or directly to affected files
+          find KernelSU/kernel -name "*.c" -exec grep -l "MODULE_IMPORT_NS" {} \; | while read f; do
+            sed -i 's/MODULE_IMPORT_NS([^)]*);/\/\* MODULE_IMPORT_NS not available on kernel 4.14 \*\//' "$f"
+            echo "Patched MODULE_IMPORT_NS in: $f"
+          done
+
+          echo "=== Verify: remaining issues ==="
+          echo "--- syscall_hook refs ---"
           find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
-            xargs grep -l "syscall_hook" 2>/dev/null || echo "CLEAN - no remaining references"
+            xargs grep -l "syscall_hook" 2>/dev/null || echo "CLEAN"
+          echo "--- MODULE_IMPORT_NS refs ---"
+          find KernelSU/kernel -name "*.c" | \
+            xargs grep -l "MODULE_IMPORT_NS" 2>/dev/null || echo "CLEAN"
 
       - name: Apply SUSFS kernel patches (fs + include)
         run: |

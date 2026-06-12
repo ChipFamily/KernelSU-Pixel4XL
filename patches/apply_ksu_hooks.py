@@ -10,25 +10,15 @@ def insert_before(content, marker, insertion):
         return content, False
     return content[:idx] + insertion + content[idx:], True
 
-def insert_after_brace(content, func_marker, insertion):
-    """Insert after the opening brace of a function."""
-    idx = content.find(func_marker)
-    if idx == -1:
-        return content, False
-    brace = content.find('\n{', idx)
-    if brace == -1:
-        return content, False
-    return content[:brace+2] + insertion + content[brace+2:], True
-
 def insert_after_declarations(content, func_marker, insertion):
     """
     Insert after the last variable declaration in a function body.
     C90 rule: all declarations must come before any code.
-    We find the first line that is NOT a declaration after the opening brace.
     """
     idx = content.find(func_marker)
     if idx == -1:
         return content, False
+    # Find the opening brace of the function body
     brace = content.find('\n{', idx)
     if brace == -1:
         return content, False
@@ -36,55 +26,43 @@ def insert_after_declarations(content, func_marker, insertion):
     # Walk line by line from after the opening brace
     pos = brace + 2  # skip past '\n{'
     lines = content[pos:].split('\n')
-    decl_end = pos
+    insert_pos = pos  # default: right after brace
+    cumulative = pos
+
     for i, line in enumerate(lines):
         stripped = line.strip()
-        # Empty lines or pure declarations (type varname;)
-        if stripped == '' or stripped == '{' or stripped == '}':
-            decl_end = pos + sum(len(l)+1 for l in lines[:i+1])
+        line_end = cumulative + len(line) + 1  # +1 for \n
+
+        if stripped == '':
+            # empty line - keep scanning
+            cumulative = line_end
             continue
-        # If line starts with a type keyword or is a declaration, skip
-        # Declaration heuristic: contains ';' and no '=' assignment that looks like code
-        # Stop when we hit the first non-declaration code line
-        is_decl = (
-            stripped.startswith('const ') or
-            stripped.startswith('struct ') or
-            stripped.startswith('unsigned ') or
-            stripped.startswith('int ') or
-            stripped.startswith('long ') or
-            stripped.startswith('char ') or
-            stripped.startswith('void ') or
-            stripped.startswith('bool ') or
-            stripped.startswith('u32 ') or
-            stripped.startswith('u64 ') or
-            stripped.startswith('loff_t ') or
-            stripped.startswith('size_t ') or
-            stripped.startswith('ssize_t ')
-        )
-        if is_decl and ';' in stripped:
-            decl_end = pos + sum(len(l)+1 for l in lines[:i+1])
-        elif stripped == '':
-            continue
+
+        # Check if this looks like a variable declaration
+        is_decl = any(stripped.startswith(t) for t in [
+            'const ', 'struct ', 'unsigned ', 'int ', 'long ',
+            'char ', 'void ', 'bool ', 'u8 ', 'u16 ', 'u32 ', 'u64 ',
+            'loff_t ', 'size_t ', 'ssize_t ', 'pid_t ', 'uid_t ',
+            'gid_t ', 'mode_t ', 'umode_t ', 'mm_segment_t ',
+            'static ', 'register ',
+        ])
+
+        if is_decl and ';' in stripped and '(' not in stripped.split(';')[0]:
+            # Looks like a declaration (not a function call ending in ;)
+            insert_pos = line_end
+            cumulative = line_end
+        elif stripped.startswith('#'):
+            # Preprocessor directive - skip
+            cumulative = line_end
         else:
+            # First non-declaration code line - insert before it
             break
 
-    return content[:decl_end] + insertion + content[decl_end:], True
+        cumulative = line_end
 
-def patch_file_after_brace(path, check_marker, decl, hook_marker, hook):
-    """Patch file inserting hook immediately after opening brace (for functions with no local vars before hook point)."""
-    with open(path, 'r') as f:
-        src = f.read()
-    if check_marker in src:
-        print(f"{path}: already patched, skipping")
-        return
-    src, ok1 = insert_before(src, hook_marker, decl)
-    src, ok2 = insert_after_brace(src, hook_marker, hook)
-    with open(path, 'w') as f:
-        f.write(src)
-    print(f"{path}: decl={ok1}, hook={ok2}")
+    return content[:insert_pos] + insertion + content[insert_pos:], True
 
-def patch_file_after_decls(path, check_marker, decl, hook_marker, hook):
-    """Patch file inserting hook after variable declarations (for C90 compliance)."""
+def patch_file(path, check_marker, decl, hook_marker, hook):
     with open(path, 'r') as f:
         src = f.read()
     if check_marker in src:
@@ -97,9 +75,7 @@ def patch_file_after_decls(path, check_marker, decl, hook_marker, hook):
     print(f"{path}: decl={ok1}, hook={ok2}")
 
 # === fs/exec.c ===
-# do_execveat_common: hook goes after opening brace, before first local var
-# but exec.c uses C99 so position after brace is fine
-patch_file_after_brace(
+patch_file(
     'fs/exec.c',
     'ksu_handle_execveat',
     '''
@@ -123,7 +99,6 @@ extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 )
 
 # === fs/open.c ===
-# faccessat/do_faccessat: has local variable declarations - must insert AFTER them
 with open('fs/open.c', 'r') as f:
     src = f.read()
 
@@ -151,8 +126,7 @@ else:
     print("fs/open.c: already patched")
 
 # === fs/read_write.c ===
-# vfs_read: insert after declarations
-patch_file_after_decls(
+patch_file(
     'fs/read_write.c',
     'ksu_handle_vfs_read',
     '''
@@ -198,8 +172,7 @@ else:
     print("fs/stat.c: already patched")
 
 # === drivers/input/input.c ===
-# input_handle_event: insert after opening brace
-patch_file_after_brace(
+patch_file(
     'drivers/input/input.c',
     'ksu_handle_input_handle_event',
     '''
@@ -218,7 +191,7 @@ extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code,
 )
 
 # === fs/devpts/inode.c ===
-patch_file_after_brace(
+patch_file(
     'fs/devpts/inode.c',
     'ksu_handle_devpts',
     '''

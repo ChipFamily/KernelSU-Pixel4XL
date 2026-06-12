@@ -114,21 +114,41 @@ jobs:
           done
 
           # 9. Fix sucompat.c for kernel 4.14
+          # - strncpy_from_user_nofault does not exist in 4.14, use strncpy_from_user
+          # - ksu_syscall_table comes from syscall_hook.h which we removed.
+          #   ksu_handle_execve_sucompat uses ksu_syscall_table to call the original syscall.
+          #   On kernel 4.14 with CONFIG_KSU_MANUAL_HOOK, execve is hooked via manual VFS hooks,
+          #   not via syscall table. So we can safely stub ksu_handle_execve_sucompat.
           find KernelSU/kernel -name "sucompat.c" | while read f; do
-            # strncpy_from_user_nofault -> strncpy_from_user (added in 5.8)
             sed -i 's/strncpy_from_user_nofault/strncpy_from_user/g' "$f"
-            # ksu_syscall_table is from syscall_hook which we disabled
-            # Replace ksu_syscall_table[nr](regs) with sys_call_table[nr](regs) cast properly
-            sed -i 's/ksu_syscall_table\[/((syscall_fn_t \*)sys_call_table)\[/g' "$f"
-            echo "Patched sucompat.c: $f"
+            # Wrap the entire ksu_handle_execve_sucompat body to return 0 if no syscall table
+            # The function is declared in sucompat.h - we redirect its implementation to a stub
+            python3 - "$f" << 'PYEOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path) as f:
+              src = f.read()
+          # Replace the entire ksu_handle_execve_sucompat function body with a stub
+          # Match from function signature to closing brace (guarded by #ifndef CONFIG_KSU_MANUAL_HOOK)
+          old = 'long ksu_handle_execve_sucompat('
+          if old in src and 'ksu_syscall_table' in src:
+              # Wrap ksu_syscall_table uses in #ifndef CONFIG_KSU_MANUAL_HOOK
+              src = src.replace(
+                  'ret = ksu_syscall_table[orig_nr](regs);',
+                  '#ifndef CONFIG_KSU_MANUAL_HOOK\n\tret = ksu_syscall_table[orig_nr](regs);\n#else\n\tret = 0;\n#endif'
+              )
+              src = src.replace(
+                  'return ksu_syscall_table[orig_nr](regs);',
+                  '#ifndef CONFIG_KSU_MANUAL_HOOK\n\treturn ksu_syscall_table[orig_nr](regs);\n#else\n\treturn 0;\n#endif'
+              )
+              with open(path, 'w') as f:
+                  f.write(src)
+              print(f"Patched ksu_syscall_table in {path}")
+          else:
+              print(f"No ksu_syscall_table found in {path}, skipping")
+          PYEOF
+            echo "sucompat.c patched: $f"
           done
-          # Also need syscall_fn_t typedef since sucompat.c now uses it via sys_call_table cast
-          # Add it to the kernel's syscall.h as a proper backport
-          SYSCALL_H="arch/arm64/include/asm/syscall.h"
-          if ! grep -q "syscall_fn_t" $SYSCALL_H; then
-            sed -i '/extern const void \*sys_call_table/a typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);' $SYSCALL_H
-            echo "Added syscall_fn_t typedef to $SYSCALL_H"
-          fi
 
           echo "=== Verify ==="
           find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
@@ -137,6 +157,8 @@ jobs:
             xargs grep -l "MODULE_IMPORT_NS" 2>/dev/null || echo "MODULE_IMPORT_NS: CLEAN"
           find KernelSU/kernel -name "*.c" | \
             xargs grep -l "strncpy_from_user_nofault" 2>/dev/null || echo "strncpy_from_user_nofault: CLEAN"
+          find KernelSU/kernel -name "*.c" | \
+            xargs grep -l "ksu_syscall_table" 2>/dev/null || echo "ksu_syscall_table: CLEAN"
 
       - name: Apply SUSFS kernel patches (fs + include)
         run: |

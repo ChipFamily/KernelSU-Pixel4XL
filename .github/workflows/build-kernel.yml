@@ -61,92 +61,38 @@ jobs:
           FORMAT_MKBOOTING=$(echo `$HOME/mkbootimg-tools/unpack_bootimg.py --boot_img=$HOME/stock/coral-tp1a.220624.014/boot.img --format mkbootimg`)
           echo "FORMAT_MKBOOTING=$FORMAT_MKBOOTING" >> $GITHUB_ENV
 
-      - name: Integrate SukiSU-Ultra (ShirkNeko fork, susfs-dev branch)
+      - name: Integrate SukiSU-Ultra (nongki branch - correct for non-GKI kernel 4.14)
+        # Per official SukiSU docs: 'nongki' branch is designed for non-GKI devices
+        # 'susfs-dev' was wrong - it targets GKI kernels (5.10+)
         run: |
           rm -f drivers/kernelsu
           rm -rf KernelSU
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
+          echo "=== SukiSU nongki integrated ==="
           echo "=== KernelSU/kernel/ structure ==="
+          ls KernelSU/kernel/
           find KernelSU/kernel -name "*syscall*" | sort
 
-      - name: Patch KernelSU for kernel 4.14 compatibility
+      - name: Apply KSU manual hooks (non-GKI method per official docs)
+        # Required for non-GKI: manually patch fs/exec.c, fs/open.c, fs/stat.c,
+        # fs/read_write.c, drivers/input/input.c, fs/devpts/inode.c
         run: |
-          # 1. Apply manual hooks patch (non-GKI method)
-          git apply $GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch || true
+          git apply $GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch
+          echo "Manual hooks applied"
 
-          # 2. Remove syscall_hook from Makefiles
-          find KernelSU/kernel -name "Makefile" -exec grep -l "syscall_hook" {} \; | \
-            xargs -r sed -i '/syscall_hook/d'
-
-          # 3. Empty syscall_hook.c
-          find KernelSU/kernel -name "syscall_hook.c" | while read f; do
-            echo "/* disabled: syscall_fn_t unavailable on kernel 4.14 */" > "$f"
-          done
-
-          # 4. Remove #include syscall_hook.h from all .c files
-          find KernelSU/kernel -name "*.c" -exec grep -l "syscall_hook" {} \; | \
-            xargs -r sed -i '/#include.*syscall_hook/d'
-
-          # 5. Remove calls to syscall_hook functions from init.c
-          find KernelSU/kernel -name "init.c" | while read f; do
-            sed -i '/ksu_syscall_hook_init/d' "$f"
-            sed -i '/ksu_syscall_hook_manager_init/d' "$f"
-            sed -i '/ksu_syscall_hook_manager_exit/d' "$f"
-          done
-
-          # 6. Stub MODULE_IMPORT_NS (added in 5.4, not in 4.14)
-          find KernelSU/kernel -name "*.c" -exec grep -l "MODULE_IMPORT_NS" {} \; | while read f; do
-            sed -i 's/MODULE_IMPORT_NS([^)]*);/\/\* MODULE_IMPORT_NS not available on kernel 4.14 \*\//' "$f"
-          done
-
-          # 7. Fix linux/pgtable.h -> asm/pgtable.h
-          find KernelSU/kernel -name "*.c" -exec grep -l "linux/pgtable.h" {} \; | \
-            xargs -r sed -i 's|#include <linux/pgtable.h>|#include <asm/pgtable.h>|g'
-
-          # 8. Fix lsm_hook.c hlist vs list
-          find KernelSU/kernel -name "lsm_hook.c" | while read f; do
-            sed -i 's/struct hlist_head/struct list_head/g' "$f"
-            sed -i 's/hlist_entry(/list_entry(/g' "$f"
-            sed -i 's/hlist_for_each_entry(/list_for_each_entry(/g' "$f"
-            sed -i 's/\.first/.next/g' "$f"
-            sed -i 's/->pprev/->prev/g' "$f"
-          done
-
-          # 9. Fix sucompat.c for kernel 4.14
-          # strncpy_from_user_nofault -> strncpy_from_user
-          find KernelSU/kernel -name "sucompat.c" | \
-            xargs -r sed -i 's/strncpy_from_user_nofault/strncpy_from_user/g'
-
-          # ksu_syscall_table is GKI-only (from syscall_hook.h which we removed)
-          # On non-GKI with CONFIG_KSU_MANUAL_HOOK, execve is intercepted via fs/exec.c hook
-          # so ksu_handle_execve_sucompat can safely return 0 instead of calling syscall table
-          # We guard with #ifndef CONFIG_KSU_MANUAL_HOOK using sed line addressing:
-          # Find lines with ksu_syscall_table and replace the whole call with return 0
-          find KernelSU/kernel -name "sucompat.c" | while read f; do
-            # Replace: ret = ksu_syscall_table[orig_nr](regs);
-            sed -i 's/ret = ksu_syscall_table\[orig_nr\](regs);/ret = 0; \/\* ksu_syscall_table disabled: non-GKI manual hook *\//g' "$f"
-            # Replace: return ksu_syscall_table[orig_nr](regs);
-            sed -i 's/return ksu_syscall_table\[orig_nr\](regs);/return 0; \/\* ksu_syscall_table disabled: non-GKI manual hook *\//g' "$f"
-            echo "=== sucompat.c ksu_syscall_table refs after patch ==="
-            grep -n "ksu_syscall_table" "$f" || echo "CLEAN"
-          done
-
-          echo "=== Final verify ==="
-          find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
-            xargs grep -l "syscall_hook" 2>/dev/null || echo "syscall_hook: CLEAN"
-          find KernelSU/kernel -name "*.c" | \
-            xargs grep -l "ksu_syscall_table" 2>/dev/null || echo "ksu_syscall_table: CLEAN"
-          find KernelSU/kernel -name "*.c" | \
-            xargs grep -l "strncpy_from_user_nofault" 2>/dev/null || echo "strncpy_nofault: CLEAN"
-
-      - name: Apply SUSFS kernel patches (fs + include)
+      - name: Apply SUSFS kernel patches (fs + include + kernel-4.14 patch)
         run: |
           git clone --depth=1 -b kernel-4.14 \
             https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
           cp -v $HOME/susfs4ksu/kernel_patches/fs/* fs/
           cp -v $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
+          # Apply KernelSU SUSFS patch
+          cp $HOME/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+          cd KernelSU && patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true && cd ..
+          # Apply kernel SUSFS patch
           cp $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
           patch -p1 --forward < 50_add_susfs_in_kernel-4.14.patch || true
+          echo "SUSFS patches applied"
 
       - name: Add KSU + SUSFS configs to floral_defconfig
         run: |

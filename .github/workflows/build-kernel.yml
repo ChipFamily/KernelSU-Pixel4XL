@@ -111,14 +111,32 @@ jobs:
             sed -i 's/hlist_for_each_entry(/list_for_each_entry(/g' "$f"
             sed -i 's/\.first/.next/g' "$f"
             sed -i 's/->pprev/->prev/g' "$f"
-            echo "Patched lsm_hook.c: $f"
           done
+
+          # 9. Fix sucompat.c for kernel 4.14
+          find KernelSU/kernel -name "sucompat.c" | while read f; do
+            # strncpy_from_user_nofault -> strncpy_from_user (added in 5.8)
+            sed -i 's/strncpy_from_user_nofault/strncpy_from_user/g' "$f"
+            # ksu_syscall_table is from syscall_hook which we disabled
+            # Replace ksu_syscall_table[nr](regs) with sys_call_table[nr](regs) cast properly
+            sed -i 's/ksu_syscall_table\[/((syscall_fn_t \*)sys_call_table)\[/g' "$f"
+            echo "Patched sucompat.c: $f"
+          done
+          # Also need syscall_fn_t typedef since sucompat.c now uses it via sys_call_table cast
+          # Add it to the kernel's syscall.h as a proper backport
+          SYSCALL_H="arch/arm64/include/asm/syscall.h"
+          if ! grep -q "syscall_fn_t" $SYSCALL_H; then
+            sed -i '/extern const void \*sys_call_table/a typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);' $SYSCALL_H
+            echo "Added syscall_fn_t typedef to $SYSCALL_H"
+          fi
 
           echo "=== Verify ==="
           find KernelSU/kernel \( -name "*.c" -o -name "Makefile" \) | \
             xargs grep -l "syscall_hook" 2>/dev/null || echo "syscall_hook: CLEAN"
           find KernelSU/kernel -name "*.c" | \
             xargs grep -l "MODULE_IMPORT_NS" 2>/dev/null || echo "MODULE_IMPORT_NS: CLEAN"
+          find KernelSU/kernel -name "*.c" | \
+            xargs grep -l "strncpy_from_user_nofault" 2>/dev/null || echo "strncpy_from_user_nofault: CLEAN"
 
       - name: Apply SUSFS kernel patches (fs + include)
         run: |

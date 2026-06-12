@@ -62,23 +62,245 @@ jobs:
           echo "FORMAT_MKBOOTING=$FORMAT_MKBOOTING" >> $GITHUB_ENV
 
       - name: Integrate SukiSU-Ultra (nongki branch - correct for non-GKI kernel 4.14)
-        # Per official SukiSU docs: 'nongki' branch is designed for non-GKI devices
-        # 'susfs-dev' was wrong - it targets GKI kernels (5.10+)
         run: |
           rm -f drivers/kernelsu
           rm -rf KernelSU
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
-          echo "=== SukiSU nongki integrated ==="
           echo "=== KernelSU/kernel/ structure ==="
           ls KernelSU/kernel/
           find KernelSU/kernel -name "*syscall*" | sort
 
-      - name: Apply KSU manual hooks (non-GKI method per official docs)
-        # Required for non-GKI: manually patch fs/exec.c, fs/open.c, fs/stat.c,
-        # fs/read_write.c, drivers/input/input.c, fs/devpts/inode.c
+      - name: Apply KSU manual hooks via Python (kernel-specific, no patch file)
+        # Official non-GKI method: insert hooks directly into kernel source files
+        # Using Python for reliable insertion at exact function locations
         run: |
-          git apply $GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch
-          echo "Manual hooks applied"
+          python3 << 'PYEOF'
+          import re
+
+          def insert_after(content, marker, insertion):
+              """Insert text after the first occurrence of marker"""
+              idx = content.find(marker)
+              if idx == -1:
+                  return content, False
+              insert_pos = idx + len(marker)
+              return content[:insert_pos] + insertion + content[insert_pos:], True
+
+          def insert_before(content, marker, insertion):
+              """Insert text before the first occurrence of marker"""
+              idx = content.find(marker)
+              if idx == -1:
+                  return content, False
+              return content[:idx] + insertion + content[idx:], True
+
+          # === fs/exec.c ===
+          with open('fs/exec.c', 'r') as f:
+              src = f.read()
+
+          if 'ksu_handle_execveat' not in src:
+              # Insert extern declarations before do_execveat_common
+              decl = '''
+#ifdef CONFIG_KSU
+extern bool ksu_execveat_hook __read_mostly;
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+			void *envp, int *flags);
+extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+				 void *argv, void *envp, int *flags);
+#endif
+'''
+              src, ok = insert_before(src, 'static int do_execveat_common(', decl)
+              print(f"exec.c: inserted decls: {ok}")
+
+              # Insert hook call at start of do_execveat_common body
+              hook = '''
+#ifdef CONFIG_KSU
+	if (unlikely(ksu_execveat_hook))
+		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+	else
+		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+#endif
+'''
+              # Find the function body opening
+              marker = 'static int do_execveat_common(int fd, struct filename *filename,\n\t\t\t      struct user_arg_ptr argv,\n\t\t\t      struct user_arg_ptr envp,\n\t\t\t      int flags)\n{'
+              src, ok = insert_after(src, marker, hook)
+              if not ok:
+                  # Try simpler match
+                  marker2 = 'static int do_execveat_common(int fd, struct filename *filename,'
+                  idx = src.find(marker2)
+                  if idx != -1:
+                      brace = src.find('\n{', idx)
+                      if brace != -1:
+                          src = src[:brace+2] + hook + src[brace+2:]
+                          ok = True
+              print(f"exec.c: inserted hook: {ok}")
+
+              with open('fs/exec.c', 'w') as f:
+                  f.write(src)
+          else:
+              print("exec.c: hooks already present")
+
+          # === fs/open.c ===
+          with open('fs/open.c', 'r') as f:
+              src = f.read()
+
+          if 'ksu_handle_faccessat' not in src:
+              decl = '''
+#ifdef CONFIG_KSU
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
+			 int *flags);
+#endif
+'''
+              # Insert before faccessat syscall
+              for marker in ['SYSCALL_DEFINE3(faccessat,', 'long do_faccessat(']:
+                  if marker in src:
+                      src, ok = insert_before(src, marker, decl)
+                      print(f"open.c: inserted decl before {marker}: {ok}")
+                      break
+
+              hook = '''#ifdef CONFIG_KSU
+	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+#endif
+'''
+              # Insert at start of faccessat body - find the opening brace
+              for marker in ['long do_faccessat(int dfd', 'SYSCALL_DEFINE3(faccessat']:
+                  idx = src.find(marker)
+                  if idx != -1:
+                      brace = src.find('\n{', idx)
+                      if brace != -1:
+                          src = src[:brace+2] + '\n' + hook + src[brace+2:]
+                          print(f"open.c: inserted hook after {marker}")
+                          break
+
+              with open('fs/open.c', 'w') as f:
+                  f.write(src)
+          else:
+              print("open.c: hooks already present")
+
+          # === fs/read_write.c ===
+          with open('fs/read_write.c', 'r') as f:
+              src = f.read()
+
+          if 'ksu_handle_vfs_read' not in src:
+              decl = '''
+#ifdef CONFIG_KSU
+extern bool ksu_vfs_read_hook __read_mostly;
+extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
+			size_t *count_ptr, loff_t **pos);
+#endif
+'''
+              src, ok = insert_before(src, 'ssize_t vfs_read(', decl)
+              print(f"read_write.c: inserted decl: {ok}")
+
+              hook = '''#ifdef CONFIG_KSU
+	if (unlikely(ksu_vfs_read_hook))
+		ksu_handle_vfs_read(&file, &buf, &count, &pos);
+#endif
+'''
+              idx = src.find('ssize_t vfs_read(')
+              if idx != -1:
+                  brace = src.find('\n{', idx)
+                  if brace != -1:
+                      src = src[:brace+2] + '\n\t' + hook.strip() + '\n' + src[brace+2:]
+                      print("read_write.c: inserted hook")
+
+              with open('fs/read_write.c', 'w') as f:
+                  f.write(src)
+          else:
+              print("read_write.c: hooks already present")
+
+          # === fs/stat.c ===
+          with open('fs/stat.c', 'r') as f:
+              src = f.read()
+
+          if 'ksu_handle_stat' not in src:
+              decl = '''
+#ifdef CONFIG_KSU
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#endif
+'''
+              # Try vfs_statx first, fall back to vfs_fstatat
+              for fn in ['int vfs_statx(', 'int vfs_fstatat(']:
+                  if fn in src:
+                      src, ok = insert_before(src, fn, decl)
+                      print(f"stat.c: inserted decl before {fn}: {ok}")
+                      hook = '''#ifdef CONFIG_KSU
+	ksu_handle_stat(&dfd, &filename, &flags);
+#endif
+'''
+                      idx = src.find(fn)
+                      if idx != -1:
+                          brace = src.find('\n{', idx)
+                          if brace != -1:
+                              src = src[:brace+2] + '\n\t' + hook.strip() + '\n' + src[brace+2:]
+                              print(f"stat.c: inserted hook in {fn}")
+                      break
+
+              with open('fs/stat.c', 'w') as f:
+                  f.write(src)
+          else:
+              print("stat.c: hooks already present")
+
+          # === drivers/input/input.c (safe mode) ===
+          with open('drivers/input/input.c', 'r') as f:
+              src = f.read()
+
+          if 'ksu_handle_input_handle_event' not in src:
+              decl = '''
+#ifdef CONFIG_KSU
+extern bool ksu_input_hook __read_mostly;
+extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
+#endif
+'''
+              src, ok = insert_before(src, 'static void input_handle_event(', decl)
+              print(f"input.c: inserted decl: {ok}")
+
+              hook = '''#ifdef CONFIG_KSU
+	if (unlikely(ksu_input_hook))
+		ksu_handle_input_handle_event(&type, &code, &value);
+#endif
+'''
+              idx = src.find('static void input_handle_event(')
+              if idx != -1:
+                  brace = src.find('\n{', idx)
+                  if brace != -1:
+                      src = src[:brace+2] + '\n\t' + hook.strip() + '\n' + src[brace+2:]
+                      print("input.c: inserted hook")
+
+              with open('drivers/input/input.c', 'w') as f:
+                  f.write(src)
+          else:
+              print("input.c: hooks already present")
+
+          # === fs/devpts/inode.c (pm support) ===
+          with open('fs/devpts/inode.c', 'r') as f:
+              src = f.read()
+
+          if 'ksu_handle_devpts' not in src:
+              decl = '''
+#ifdef CONFIG_KSU
+extern int ksu_handle_devpts(struct inode*);
+#endif
+'''
+              src, ok = insert_before(src, 'void *devpts_get_priv(', decl)
+              print(f"inode.c: inserted decl: {ok}")
+
+              hook = '''#ifdef CONFIG_KSU
+	ksu_handle_devpts(dentry->d_inode);
+#endif
+'''
+              idx = src.find('void *devpts_get_priv(')
+              if idx != -1:
+                  brace = src.find('\n{', idx)
+                  if brace != -1:
+                      src = src[:brace+2] + '\n\t' + hook.strip() + '\n' + src[brace+2:]
+                      print("inode.c: inserted hook")
+
+              with open('fs/devpts/inode.c', 'w') as f:
+                  f.write(src)
+          else:
+              print("inode.c: hooks already present")
+
+          print("=== All KSU hooks applied ===")
+          PYEOF
 
       - name: Apply SUSFS kernel patches (fs + include + kernel-4.14 patch)
         run: |
@@ -86,10 +308,8 @@ jobs:
             https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
           cp -v $HOME/susfs4ksu/kernel_patches/fs/* fs/
           cp -v $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
-          # Apply KernelSU SUSFS patch
           cp $HOME/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
           cd KernelSU && patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true && cd ..
-          # Apply kernel SUSFS patch
           cp $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
           patch -p1 --forward < 50_add_susfs_in_kernel-4.14.patch || true
           echo "SUSFS patches applied"
